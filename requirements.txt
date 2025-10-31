@@ -1,3 +1,4 @@
 pathlib
 argparse
 typing
+dotenv
