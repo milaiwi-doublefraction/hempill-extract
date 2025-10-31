@@ -121,9 +121,7 @@ class MetadataProcessor:
                 print(f"[✓] Found OPR path: {opr_path}")
 
             # --- NEW AGGREGATION STRUCTURE ---
-            # 1. Stores the primary document metadata (IndexDocs, IndexParcels, etc.)
             main_records: Dict[str, Dict] = {}
-            # 2. Stores one-to-many records (IndexLegals, IndexParties, etc.)
             legal_map: Dict[str, List[Dict]] = {}
             party_map: Dict[str, List[Dict]] = {}
             # ---------------------------------
@@ -212,35 +210,26 @@ class MetadataProcessor:
 
             # --- ENRICHMENT STEP: Add data from one-to-many files ---
             
-            # 1. Add Parties (Grantors/Grantees)
             for party_record in party_map.get(original_doc_number, []):
                 party_type = party_record.get("PartyType", "").lower()
                 party_name = party_record.get("PartyName")
-                
-                party_data = {
-                    "name": party_name,
-                    "address1": party_record.get("PartyAddress1"),
-                    "city": party_record.get("PartyCity"),
-                    "state": party_record.get("PartyState"),
-                    # ... add more party fields as needed
-                }
-                
+
                 if "grantor" in party_type:
-                    mongo_record["grantors"].append(party_data)
+                    mongo_record["grantors"].append(party_name)
                 elif "grantee" in party_type:
-                    mongo_record["grantees"].append(party_data)
+                    mongo_record["grantees"].append(party_name)
                     
             # 2. Add Legal Descriptions
             for legal_record in legal_map.get(original_doc_number, []):
                 # Map legal fields to your desired legal_description schema
-                mongo_record["legal_descriptions"].append({
-                    "block": legal_record.get("Block"),
-                    "lot": legal_record.get("Lot"),
-                    "subdivision": legal_record.get("Subdivision"),
-                    "survey_name": legal_record.get("SurveyName"),
-                    "acres": legal_record.get("Acres"),
-                    # ... add more legal fields as needed
-                })
+                abstract_number = legal_record.get('AbstractNumber')
+                if abstract_number:
+                    survey_name = legal_record.get('SurveyName') or ""
+                    block = legal_record.get('Block') or ""
+                    section = legal_record.get('Section') or ""
+                    acres = legal_record.get('Acres') or ""
+                    legal_description = f"Abst #: {abstract_number} Survey Name: {survey_name} Block: {block} Section: {section} Acres: {acres}"
+                    mongo_record["legal_descriptions"].append(legal_description)
 
             mapping[doc_number_key] = mongo_record
 
@@ -274,21 +263,57 @@ class MetadataProcessor:
         """Reads IndexDocs.txt or similar data file and returns dict of DocNumber -> metadata."""
         doc_map = {}
         expected_fields = len(field_names)
+        base_name = data_path.stem
 
         with open(data_path, encoding="utf-8") as f:
-            reader = csv.reader(f, skipinitialspace=True)
+            reader = csv.reader(
+                f,
+                skipinitialspace=True,
+                delimiter=',',
+                quotechar='"',
+                quoting=csv.QUOTE_MINIMAL 
+            )
             for line_num, row in enumerate(reader, start=1):
                 if not row or not row[0].strip():
                     continue
 
-                # Ensure we have correct number of fields
+                actual_fields = len(row)
+                
+
+                # The purpose of this chunk of code is because at times the csv parser will fail when there are
+                # quotes on the data. This is a heuristic to fix the data.
+                if actual_fields != expected_fields:                    
+                    fixed_row = None
+                    
+                    if base_name == "IndexParties" and expected_fields == 8 and actual_fields == 9:
+                        new_party_name = row[1].strip().strip('"') + ", " + row[2].strip().strip('"')
+                        fixed_row = [row[0]] + [new_party_name] + row[3:]
+
+                    elif base_name == "IndexLegals" and expected_fields == 15 and actual_fields > 15:
+                        notes_field_index = 7
+                        overrun_count = actual_fields - expected_fields
+                        
+                        merged_notes = ", ".join(row[notes_field_index : notes_field_index + overrun_count + 1])
+                        
+                        fixed_row = row[:notes_field_index] + [merged_notes] + row[notes_field_index + overrun_count + 1:]
+                        
+                        if len(fixed_row) == expected_fields:
+                             row = fixed_row
+                        else:
+                            fixed_row = None # Revert to error print/skip if fix failed
+                    elif base_name == "IndexDocs" and expected_fields == 19 and actual_fields == 20:
+                        add1_index = 14
+                        merged_address = row[add1_index].strip().strip('"') + ", " + row[add1_index + 1].strip().strip('"')
+                        fixed_row = row[:add1_index] + [merged_address] + row[add1_index + 2:]
+
+                    if fixed_row:
+                        row = fixed_row
+                        actual_fields = len(row)
+
                 if len(row) != expected_fields:
                     if self.verbose:
                         print(f"[!] Warning: line {line_num} in {data_path.name} has {len(row)} fields (expected {expected_fields})")
-                        # Print small preview to debug
-                        preview = ', '.join(row[:5])
-                        print(f"    → Row preview: {preview}")
-                    # Skip malformed line
+                        print(f"    → Row preview: {row}")
                     continue
 
                 doc_number = row[0].strip().strip('"').strip("'")
@@ -334,8 +359,6 @@ class MetadataProcessor:
                 "file_name": tif_path.name,
                 "downloaded": True,
                 "created_at": datetime.utcnow().isoformat() + "Z",
-                "last_scraped": datetime.utcnow().isoformat() + "Z",
-                "last_downloaded": datetime.utcnow().isoformat() + "Z",
                 "grantees": [],
                 "grantors": [],
                 "legal_descriptions": [],
